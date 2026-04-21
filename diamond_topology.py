@@ -1,180 +1,117 @@
 #!/usr/bin/env python3
 """
-CSCI 4550/5550 - Programming Assignment 3
-Diamond Network Topology with OSPF Routing
-Author: Takudzwa13
+ECMP Traffic Monitor for PA3
 """
 
-import os
+import sys
 import time
-from mininet.net import Mininet
-from mininet.cli import CLI
-from mininet.node import Node
-from mininet.link import TCLink
-from mininet.log import info, setLogLevel
 
 
-class FRRouting(Node):
-    """Custom router node running FRRouting OSPF daemon"""
-    
-    def __init__(self, name, **params):
-        super(FRRouting, self).__init__(name, **params)
-        self.run_dir = f'/tmp/{name}-runtime'
-        self.conf_dir = f'/tmp/{name}-config'
-    
-    def start_ospf(self, networks):
-        """Start OSPF routing on this router"""
-        # Enable IP forwarding
-        self.cmd('sysctl -w net.ipv4.ip_forward=1')
-        self.cmd('sysctl -w net.ipv4.fib_multipath_hash_policy=1')
-        
-        # Create runtime directory
-        self.cmd(f'rm -rf {self.run_dir}')
-        self.cmd(f'mkdir -p {self.run_dir}')
-        self.cmd(f'chown frr:frr {self.run_dir}')
-        self.cmd(f'chmod 775 {self.run_dir}')
-        
-        # Create config directory and file
-        os.makedirs(self.conf_dir, exist_ok=True)
-        conf_file = f'{self.conf_dir}/frr.conf'
-        
-        # Build OSPF network statements
-        ospf_networks = "\n".join([f" network {net} area 0" for net in networks])
-        
-        # FRR configuration
-        config = f"""hostname {self.name}
-password zebra
-log stdout
-!
-router ospf
- ospf router-id {self.params.get('router_id', '1.1.1.1')}
-{ospf_networks}
-!
-"""
-        
-        with open(conf_file, 'w') as f:
-            f.write(config)
-        
-        self.cmd(f'chown -R frr:frr {self.conf_dir}')
-        
-        # Start Zebra daemon (kernel routing table manager)
-        self.cmd(f'/usr/lib/frr/zebra -d -f {conf_file} -u frr -g frr '
-                f'-z {self.run_dir}/zserv.api --vty_socket {self.run_dir} '
-                f'-i {self.run_dir}/zebra.pid')
-        
-        # Start OSPF daemon
-        self.cmd(f'/usr/lib/frr/ospfd -d -f {conf_file} -u frr -g frr '
-                f'-z {self.run_dir}/zserv.api --vty_socket {self.run_dir} '
-                f'-i {self.run_dir}/ospfd.pid')
-        
-        self._wait_for_frr()
-    
-    def _wait_for_frr(self):
-        """Wait for FRR socket files to appear"""
-        info(f"  Waiting for {self.name}...")
-        for _ in range(10):
-            result = self.cmd(f'ls {self.run_dir}/zebra.vty 2>/dev/null')
-            if "zebra.vty" in result:
-                self.cmd(f'chmod 666 {self.run_dir}/*.vty')
-                self.cmd(f'chmod 666 {self.run_dir}/zserv.api')
-                info(" ready\n")
-                return
-            time.sleep(0.5)
-        info(" WARNING: Timeout\n")
-    
-    def terminate(self):
-        """Clean up FRR processes"""
-        self.cmd(f'kill -9 $(cat {self.run_dir}/ospfd.pid) 2>/dev/null')
-        self.cmd(f'kill -9 $(cat {self.run_dir}/zebra.pid) 2>/dev/null')
-        self.cmd(f'rm -rf {self.run_dir}')
-        self.cmd(f'rm -rf {self.conf_dir}')
-        super(FRRouting, self).terminate()
+IFACE1 = 'r1-eth1'
+IFACE2 = 'r1-eth2'
+OUTPUT_PLOT = '/tmp/ecmp_traffic.png'
 
 
-def create_diamond_topology():
-    """Build the diamond network topology"""
+def get_tx_bytes(iface):
+    try:
+        with open('/proc/net/dev', 'r') as f:
+            for line in f:
+                if ':' in line and iface in line:
+                    parts = line.split(':')
+                    stats = parts[1].strip().split()
+                    if len(stats) >= 9:
+                        return int(stats[8])
+        return 0
+    except:
+        return 0
+
+
+def monitor(interval, duration):
+    times = []
+    cumul1 = []
+    cumul2 = []
+    rates1 = []
+    rates2 = []
     
-    net = Mininet(link=TCLink)
+    prev1 = get_tx_bytes(IFACE1)
+    prev2 = get_tx_bytes(IFACE2)
+    start1 = prev1
+    start2 = prev2
     
-    # Hosts
-    h1 = net.addHost('h1', ip='10.0.0.1/24')
-    h2 = net.addHost('h2', ip='10.0.0.2/24')
-    h3 = net.addHost('h3', ip='10.0.1.1/24')
-    h4 = net.addHost('h4', ip='10.0.1.2/24')
+    start_time = time.time()
+    end_time = start_time + duration
     
-    # Switches
-    s1 = net.addSwitch('s1')
-    s2 = net.addSwitch('s2')
+    print("\n" + "="*90)
+    print(f"{'Time(s)':>8}  {'eth1 Cumul(MB)':>18}  {'eth1 Rate(MB/s)':>20}  {'eth2 Cumul(MB)':>18}  {'eth2 Rate(MB/s)':>20}")
+    print("-"*90)
     
-    # Routers
-    r1 = net.addHost('r1', cls=FRRouting, router_id='1.1.1.1')
-    r2 = net.addHost('r2', cls=FRRouting, router_id='2.2.2.2')
-    r3 = net.addHost('r3', cls=FRRouting, router_id='3.3.3.3')
-    r4 = net.addHost('r4', cls=FRRouting, router_id='4.4.4.4')
+    while time.time() < end_time:
+        time.sleep(interval)
+        elapsed = time.time() - start_time
+        
+        curr1 = get_tx_bytes(IFACE1)
+        curr2 = get_tx_bytes(IFACE2)
+        
+        total1 = (curr1 - start1) / 1000000
+        total2 = (curr2 - start2) / 1000000
+        
+        rate1 = ((curr1 - prev1) / interval) / 1000000
+        rate2 = ((curr2 - prev2) / interval) / 1000000
+        
+        times.append(elapsed)
+        cumul1.append(total1)
+        cumul2.append(total2)
+        rates1.append(rate1)
+        rates2.append(rate2)
+        
+        print(f"{elapsed:>8.1f}  {total1:>18.3f}  {rate1:>20.3f}  {total2:>18.3f}  {rate2:>20.3f}")
+        
+        prev1, prev2 = curr1, curr2
     
-    # LAN Connections
-    net.addLink(h1, s1)
-    net.addLink(h2, s1)
-    net.addLink(s1, r1)
+    return {'times': times, 'cumul1': cumul1, 'cumul2': cumul2, 'rate1': rates1, 'rate2': rates2}
+
+
+def plot(data):
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+        t = data['times']
+        
+        ax1.plot(t, data['cumul1'], 'b-', label='r1-eth1 (via r2)')
+        ax1.plot(t, data['cumul2'], 'r-', label='r1-eth2 (via r3)')
+        ax1.set_xlabel('Time (s)')
+        ax1.set_ylabel('Cumulative TX (MB)')
+        ax1.set_title('ECMP Traffic - Cumulative')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        ax2.plot(t, data['rate1'], 'b-', label='r1-eth1 (via r2)')
+        ax2.plot(t, data['rate2'], 'r-', label='r1-eth2 (via r3)')
+        ax2.set_xlabel('Time (s)')
+        ax2.set_ylabel('Rate (MB/s)')
+        ax2.set_title('ECMP Traffic - Instantaneous Rate')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(OUTPUT_PLOT, dpi=150)
+        print(f"\nPlot saved: {OUTPUT_PLOT}")
+    except ImportError:
+        print("\nmatplotlib not installed")
+
+
+def main():
+    interval = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0
+    duration = float(sys.argv[2]) if len(sys.argv) > 2 else 60.0
     
-    net.addLink(h3, s2)
-    net.addLink(h4, s2)
-    net.addLink(s2, r4)
-    
-    # Core Diamond Connections (100 Mbps, 10ms delay)
-    net.addLink(r1, r2, bw=100, delay='10ms')
-    net.addLink(r1, r3, bw=100, delay='10ms')
-    net.addLink(r2, r4, bw=100, delay='10ms')
-    net.addLink(r3, r4, bw=100, delay='10ms')
-    
-    net.start()
-    
-    # Configure Router Interfaces
-    info("\n*** Configuring router interfaces\n")
-    
-    r1.cmd('ifconfig r1-eth0 10.0.0.254 netmask 255.255.255.0 up')
-    r1.cmd('ifconfig r1-eth1 10.0.12.1 netmask 255.255.255.252 up')
-    r1.cmd('ifconfig r1-eth2 10.0.13.1 netmask 255.255.255.252 up')
-    
-    r2.cmd('ifconfig r2-eth0 10.0.12.2 netmask 255.255.255.252 up')
-    r2.cmd('ifconfig r2-eth1 10.0.24.1 netmask 255.255.255.252 up')
-    
-    r3.cmd('ifconfig r3-eth0 10.0.13.2 netmask 255.255.255.252 up')
-    r3.cmd('ifconfig r3-eth1 10.0.34.1 netmask 255.255.255.252 up')
-    
-    r4.cmd('ifconfig r4-eth0 10.0.24.2 netmask 255.255.255.252 up')
-    r4.cmd('ifconfig r4-eth1 10.0.34.2 netmask 255.255.255.252 up')
-    r4.cmd('ifconfig r4-eth2 10.0.1.254 netmask 255.255.255.0 up')
-    
-    # Start OSPF on each router
-    info("\n*** Starting OSPF routing\n")
-    
-    r1.start_ospf(['10.0.0.0/24', '10.0.12.0/30', '10.0.13.0/30'])
-    r2.start_ospf(['10.0.12.0/30', '10.0.24.0/30'])
-    r3.start_ospf(['10.0.13.0/30', '10.0.34.0/30'])
-    r4.start_ospf(['10.0.1.0/24', '10.0.24.0/30', '10.0.34.0/30'])
-    
-    # Configure host default gateways
-    h1.cmd('ip route add default via 10.0.0.254')
-    h2.cmd('ip route add default via 10.0.0.254')
-    h3.cmd('ip route add default via 10.0.1.254')
-    h4.cmd('ip route add default via 10.0.1.254')
-    
-    info("\n" + "="*60 + "\n")
-    info("TOPOLOGY READY!\n")
-    info("="*60 + "\n")
-    info("OSPF needs 30-40 seconds to converge\n")
-    info("Commands to try:\n")
-    info("  mininet> h1 ping h2\n")
-    info("  mininet> h1 ping h3\n")
-    info("  mininet> r1 ip route\n")
-    info("  mininet> xterm r1 h1 h3\n")
-    info("="*60 + "\n")
-    
-    CLI(net)
-    net.stop()
+    print(f"ECMP Monitor - Interval: {interval}s, Duration: {duration}s")
+    data = monitor(interval, duration)
+    if data['times']:
+        plot(data)
 
 
 if __name__ == '__main__':
-    setLogLevel('info')
-    create_diamond_topology()
+    main()
