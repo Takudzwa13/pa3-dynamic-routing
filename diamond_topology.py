@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PA3 - Diamond Network Topology with OSPF - WORKING VERSION
+PA3 - Diamond Network Topology with OSPF - CORRECT VERSION
 """
 
 import os
@@ -80,7 +80,7 @@ def build_topology():
     h3 = net.addHost('h3', ip='10.0.1.1/24')
     h4 = net.addHost('h4', ip='10.0.1.2/24')
     
-    info("*** Adding switches (standalone mode)\n")
+    info("*** Adding switches\n")
     s1 = net.addSwitch('s1', cls=OVSSwitch, failMode='standalone')
     s2 = net.addSwitch('s2', cls=OVSSwitch, failMode='standalone')
     
@@ -91,14 +91,17 @@ def build_topology():
     r4 = net.addHost('r4', cls=FRR, router_id='4.4.4.4')
     
     info("*** Creating links\n")
+    # LAN 1
     net.addLink(h1, s1)
     net.addLink(h2, s1)
     net.addLink(s1, r1)
     
+    # LAN 2
     net.addLink(h3, s2)
     net.addLink(h4, s2)
     net.addLink(s2, r4)
     
+    # Core diamond
     net.addLink(r1, r2, bw=100, delay='10ms')
     net.addLink(r1, r3, bw=100, delay='10ms')
     net.addLink(r2, r4, bw=100, delay='10ms')
@@ -107,16 +110,20 @@ def build_topology():
     net.start()
     
     info("\n*** Configuring router interfaces\n")
+    # r1: gateway for LAN 1
     r1.cmd('ifconfig r1-eth0 10.0.0.254 netmask 255.255.255.0 up')
     r1.cmd('ifconfig r1-eth1 10.0.12.1 netmask 255.255.255.252 up')
     r1.cmd('ifconfig r1-eth2 10.0.13.1 netmask 255.255.255.252 up')
     
+    # r2
     r2.cmd('ifconfig r2-eth0 10.0.12.2 netmask 255.255.255.252 up')
     r2.cmd('ifconfig r2-eth1 10.0.24.1 netmask 255.255.255.252 up')
     
+    # r3
     r3.cmd('ifconfig r3-eth0 10.0.13.2 netmask 255.255.255.252 up')
     r3.cmd('ifconfig r3-eth1 10.0.34.1 netmask 255.255.255.252 up')
     
+    # r4: gateway for LAN 2
     r4.cmd('ifconfig r4-eth0 10.0.24.2 netmask 255.255.255.252 up')
     r4.cmd('ifconfig r4-eth1 10.0.34.2 netmask 255.255.255.252 up')
     r4.cmd('ifconfig r4-eth2 10.0.1.254 netmask 255.255.255.0 up')
@@ -127,6 +134,7 @@ def build_topology():
     r3.start_frr(['10.0.13.0/30', '10.0.34.0/30'])
     r4.start_frr(['10.0.1.0/24', '10.0.24.0/30', '10.0.34.0/30'])
     
+    # Set default gateways for hosts
     h1.cmd('ip route add default via 10.0.0.254')
     h2.cmd('ip route add default via 10.0.0.254')
     h3.cmd('ip route add default via 10.0.1.254')
